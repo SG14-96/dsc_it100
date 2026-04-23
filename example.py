@@ -1,25 +1,21 @@
 """
 example.py
 ----------
-Demonstrates the IT100 queue-based event pattern.
+Demonstrates the IT100 typed handler pattern (reference library methodology).
 
-All packets flow through a single queue.Queue.  A single handle() function
-dispatches on pkt['command'].
+Mirrors the structure from examples/simple.py in the kostko/dsc-it100 repo:
+  instantiate driver → set handler properties → connect → run forever
 
 Run:
     python example.py
 """
 
-import queue
+import asyncio
 import time
 import logging
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-
-from dsc_it100 import (
-    IT100,
+from dsc_it100 import IT100
+from constants import (
     CMD_ZONE_OPEN, CMD_ZONE_RESTORED,
     CMD_ZONE_ALARM, CMD_ZONE_ALARM_RESTORE,
     CMD_ZONE_TAMPER, CMD_ZONE_TAMPER_RESTORE,
@@ -49,167 +45,114 @@ BAUD        = 9600
 USER_CODE   = "7321"
 PARTITION   = 1
 
-
-# ---------------------------------------------------------------------------
-# Collected state
-# ---------------------------------------------------------------------------
-
-labels: dict[int, str] = {}   # label_number -> label text
+labels: dict[int, str] = {}
+_last_label_at: float = 0.0
 
 
-# ---------------------------------------------------------------------------
-# Single handler — dispatches on pkt['command']
-# ---------------------------------------------------------------------------
-
-def handle(pkt: dict) -> None:
+def handle_zone_update(driver, pkt):
     cmd = pkt['command']
     d   = pkt['parsed']
 
     if cmd == CMD_ZONE_OPEN:
-        print(f"[ZONE]       Zone {d['zone']} opened")
-
+        print(f"[ZONE]   Zone {d['zone']} opened")
     elif cmd == CMD_ZONE_RESTORED:
-        print(f"[ZONE]       Zone {d['zone']} closed/restored")
-
+        print(f"[ZONE]   Zone {d['zone']} closed/restored")
     elif cmd == CMD_ZONE_ALARM:
-        print(f"[ALARM]      Zone {d['zone']} in ALARM (partition {d['partition']})")
-
+        print(f"[ALARM]  Zone {d['zone']} in ALARM (partition {d['partition']})")
     elif cmd == CMD_ZONE_ALARM_RESTORE:
-        print(f"[ALARM]      Zone {d['zone']} alarm restored (partition {d['partition']})")
+        print(f"[ALARM]  Zone {d['zone']} alarm restored (partition {d['partition']})")
+    elif cmd == CMD_ZONE_TAMPER:
+        print(f"[TAMPER] Zone {d['zone']} TAMPER (partition {d['partition']})")
+    elif cmd == CMD_ZONE_TAMPER_RESTORE:
+        print(f"[TAMPER] Zone {d['zone']} tamper restore (partition {d['partition']})")
 
-    elif cmd in (CMD_ZONE_TAMPER, CMD_ZONE_TAMPER_RESTORE):
-        state = "TAMPER" if cmd == CMD_ZONE_TAMPER else "tamper restore"
-        print(f"[TAMPER]     Zone {d['zone']} {state} (partition {d['partition']})")
 
-    elif cmd == CMD_PARTITION_READY:
-        print(f"[PARTITION]  Partition {d['partition']} READY")
+def handle_partition_update(driver, pkt):
+    cmd = pkt['command']
+    d   = pkt['parsed']
+    p   = d.get('partition', '?')
 
+    if cmd == CMD_PARTITION_READY:
+        print(f"[PART]   Partition {p} READY")
     elif cmd == CMD_PARTITION_NOT_READY:
-        print(f"[PARTITION]  Partition {d['partition']} NOT READY")
-
+        print(f"[PART]   Partition {p} NOT READY")
     elif cmd == CMD_PARTITION_ARMED:
-        print(f"[PARTITION]  Partition {d['partition']} ARMED ({d.get('mode', '?')})")
-
+        print(f"[PART]   Partition {p} ARMED ({d.get('mode', '?')})")
     elif cmd == CMD_PARTITION_DISARMED:
-        print(f"[PARTITION]  Partition {d['partition']} DISARMED")
-
+        print(f"[PART]   Partition {p} DISARMED")
     elif cmd == CMD_PARTITION_IN_ALARM:
-        print(f"[ALARM]      Partition {d['partition']} IN ALARM")
-
+        print(f"[ALARM]  Partition {p} IN ALARM")
     elif cmd == CMD_EXIT_DELAY:
-        print(f"[PARTITION]  Partition {d['partition']} — exit delay")
-
+        print(f"[PART]   Partition {p} — exit delay")
     elif cmd == CMD_ENTRY_DELAY:
-        print(f"[PARTITION]  Partition {d['partition']} — entry delay")
-
+        print(f"[PART]   Partition {p} — entry delay")
     elif cmd == CMD_KEYPAD_LOCKOUT:
-        print(f"[PARTITION]  Partition {d['partition']} LOCKED OUT")
-
+        print(f"[PART]   Partition {p} LOCKED OUT")
     elif cmd == CMD_FAIL_TO_ARM:
-        print(f"[PARTITION]  Partition {d['partition']} FAILED TO ARM")
-
+        print(f"[PART]   Partition {p} FAILED TO ARM")
     elif cmd == CMD_USER_CLOSING:
-        print(f"[OPEN/CLOSE] Partition {d['partition']} armed by user {d.get('user')}")
-
+        print(f"[O/C]    Partition {p} armed by user {d.get('user')}")
     elif cmd == CMD_USER_OPENING:
-        print(f"[OPEN/CLOSE] Partition {d['partition']} disarmed by user {d.get('user')}")
-
+        print(f"[O/C]    Partition {p} disarmed by user {d.get('user')}")
     elif cmd == CMD_CODE_REQUIRED:
-        print(f"[KEYPAD]     Code required on partition {d['partition']}")
+        print(f"[KEYPAD] Code required on partition {p}")
 
-    elif cmd == CMD_LCD_UPDATE:
-        print(f"[LCD]        Line {d['line']}: {d.get('text', '')}")
 
+def handle_general_update(driver, pkt):
+    global _last_label_at
+
+    cmd = pkt['command']
+    d   = pkt['parsed']
+
+    if cmd == CMD_LCD_UPDATE:
+        print(f"[LCD]    Line {d['line']}: {d.get('text', '')}")
     elif cmd == CMD_LED_STATUS:
-        print(f"[LED]        {d.get('led', '?')} LED is {d.get('state', '?')}")
-
+        print(f"[LED]    {d.get('led', '?')} LED is {d.get('state', '?')}")
     elif cmd == CMD_SOFTWARE_VERSION:
-        print(f"[SYSTEM]     IT-100 firmware v{d.get('version')}.{d.get('sub_version')}")
-
+        print(f"[SYS]    IT-100 firmware v{d.get('version')}.{d.get('sub_version')}")
     elif cmd == CMD_COMMAND_ACK:
-        print(f"[ACK]        Command {d.get('acknowledged_command')} acknowledged")
-
+        print(f"[ACK]    Command {d.get('acknowledged_command')} acknowledged")
     elif cmd == CMD_COMMAND_ERROR:
-        print("[ERROR]      Command received with bad checksum")
-
+        print("[ERROR]  Command received with bad checksum")
     elif cmd == CMD_SYSTEM_ERROR:
-        print(f"[ERROR]      System error: {d.get('error_description')}")
-
+        print(f"[ERROR]  System error: {d.get('error_description')}")
     elif cmd == CMD_PANEL_BATTERY_TROUBLE:
-        print("[TROUBLE]    Panel battery LOW")
-
+        print("[TROUBLE] Panel battery LOW")
     elif cmd == CMD_PANEL_BATTERY_RESTORE:
-        print("[TROUBLE]    Panel battery restored")
-
+        print("[TROUBLE] Panel battery restored")
     elif cmd == CMD_PANEL_AC_TROUBLE:
-        print("[TROUBLE]    Panel AC power LOST")
-
+        print("[TROUBLE] Panel AC power LOST")
     elif cmd == CMD_PANEL_AC_RESTORE:
-        print("[TROUBLE]    Panel AC power restored")
-
+        print("[TROUBLE] Panel AC power restored")
     elif cmd == CMD_BROADCAST_LABELS:
         num = d.get('label_number')
         if num is not None:
             labels[num] = d.get('label', '')
+            _last_label_at = time.monotonic()
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+async def main():
+    panel = IT100(SERIAL_PORT, baud=BAUD)
+    panel.handler_zone_update      = handle_zone_update
+    panel.handler_partition_update = handle_partition_update
+    panel.handler_general_update   = handle_general_update
+    await panel.connect()
 
-def main():
-    q     = queue.Queue()
-    panel = IT100(port=SERIAL_PORT, baud=BAUD)
+    # Yield once so the reader task gets its first chance to start,
+    # then send startup commands in order.
+    await asyncio.sleep(0)
+    await panel.poll()            # confirm link is alive
+    await panel.request_status()  # snapshot all zones and partitions
+    await panel.request_labels()  # fetch programmable labels (arrives as many packets)
 
-    # Single registration — every packet lands in the queue
-    panel.on('*', q.put)
+    try:
+        await asyncio.Future()  # run until cancelled
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        await panel.disconnect()
 
-    with panel:
-        print(f"Connected to IT-100 on {SERIAL_PORT}")
-
-        # Verify comms and get a full zone/partition snapshot
-        #panel.poll()
-        panel.request_status()
-
-        # Request labels; wait until 1.5 s of silence (max 15 s).
-        # At 9600 baud 151 labels can take ~7 s.
-        panel.request_labels()
-        _last_label_at = time.monotonic()
-        _deadline      = time.monotonic() + 15.0
-        _labels_done   = False
-
-        print("\nListening for events. Press Ctrl+C to stop.\n")
-        try:
-            while True:
-                try:
-                    pkt = q.get(timeout=0.1)
-                except queue.Empty:
-                    # Check if label collection is complete
-                    if (not _labels_done
-                            and labels
-                            and (time.monotonic() - _last_label_at) >= 1.5):
-                        _labels_done = True
-                        print("\n--- Programmable Labels ---")
-                        for num, text in sorted(labels.items()):
-                            print(f"  [{num:3d}] {text}")
-                        print("---------------------------\n")
-                    elif (not _labels_done
-                            and not labels
-                            and time.monotonic() > _deadline):
-                        _labels_done = True
-                        print("\n[LABELS] No labels received (PC1616/1832/1864 panels only)\n")
-                    continue
-
-                handle(pkt)
-
-                if pkt['command'] == CMD_BROADCAST_LABELS:
-                    _last_label_at = time.monotonic()
-
-        except KeyboardInterrupt:
-            print("\nStopping.")
-
-        print("Disconnecting.")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
