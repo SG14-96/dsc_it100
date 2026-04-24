@@ -1,13 +1,11 @@
-name: Python package
+name: Publish
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
+  release:
+    types: [published]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -16,6 +14,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -37,8 +37,7 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: test
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -46,6 +45,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -54,7 +55,8 @@ jobs:
 
       - name: Build package
         run: |
-          pip install build
+          python -m pip install --upgrade pip
+          pip install build hatch-vcs
           python -m build
 
       - name: Publish to PyPI
