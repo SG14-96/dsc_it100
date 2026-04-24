@@ -1,13 +1,13 @@
 """
-example.py
-----------
-Demonstrates the IT100 typed handler pattern (reference library methodology).
+simple.py
+---------
+Demonstrates the IT100 typed handler pattern.
 
 Mirrors the structure from examples/simple.py in the kostko/dsc-it100 repo:
   instantiate driver → set handler properties → connect → run forever
 
-Run:
-    python example.py
+Run (from repo root, with package installed):
+    python examples/simple.py
 """
 
 import asyncio
@@ -15,7 +15,7 @@ import time
 import logging
 
 from dsc_it100 import IT100
-from constants import (
+from dsc_it100.constants import (
     CMD_ZONE_OPEN, CMD_ZONE_RESTORED,
     CMD_ZONE_ALARM, CMD_ZONE_ALARM_RESTORE,
     CMD_ZONE_TAMPER, CMD_ZONE_TAMPER_RESTORE,

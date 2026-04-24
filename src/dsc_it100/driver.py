@@ -1,29 +1,11 @@
-"""
-dsc_it100.py
-============
-Async Python interface for the DSC IT-100 Data Interface Module.
-
-Usage example:
-    import asyncio
-
-    async def main():
-        async with IT100('/dev/ttyUSB0', baud=9600) as panel:
-            panel.on('zone_open', lambda pkt: print(f"Zone {pkt['parsed']['zone']} opened"))
-            panel.on('partition_alarm', lambda pkt: print(f"ALARM on partition {pkt['parsed']['partition']}"))
-            await panel.poll()           # verify comms
-            await panel.request_status() # get full zone/partition snapshot
-            await asyncio.sleep(30)
-
-    asyncio.run(main())
-"""
-
 import asyncio
 import contextlib
+import inspect
 import serial
 import logging
 from typing import Callable, Optional
 
-from constants import (
+from .constants import (
     EVENTS, BAUD_RATES, PANIC_PANIC,
     CMD_POLL, CMD_STATUS_REQUEST, CMD_LABELS_REQUEST, CMD_SET_TIME_DATE,
     CMD_COMMAND_OUTPUT, CMD_ARM_AWAY, CMD_ARM_STAY, CMD_ARM_NO_ENTRY_DELAY,
@@ -33,7 +15,7 @@ from constants import (
     CMD_TIME_BROADCAST_CONTROL, CMD_TEMP_BROADCAST_CONTROL,
     CMD_VIRTUAL_KEYPAD_CONTROL, CMD_CODE_REQUIRED,
 )
-from utils import build_packet, parse_packet, _safe_coro, _safe_call, _pad_code
+from .utils import build_packet, parse_packet, _safe_coro, _safe_call, _pad_code
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +35,36 @@ class IT100:
 
     Usage example::
 
-        async with IT100('/dev/ttyUSB0') as panel:
-            panel.on('zone_open', lambda pkt: print(pkt['parsed']))
+        async def main():
+            panel = IT100('/dev/ttyUSB0')
+            panel.handler_zone_update      = on_zone_update
+            panel.handler_partition_update = on_partition_update
+            panel.handler_general_update   = on_general_update
+            await panel.connect()
+            await asyncio.sleep(0)
+            await panel.poll()
             await panel.request_status()
-            await asyncio.sleep(10)
+            await panel.request_labels()
+            try:
+                await asyncio.Future()
+            except (KeyboardInterrupt, asyncio.CancelledError):
+                pass
+            finally:
+                await panel.disconnect()
 
-    Callbacks registered via ``on()`` may be plain functions or coroutines;
-    both are dispatched non-blocking from the event loop.
+        asyncio.run(main())
+
+    Typed handler properties
+    ------------------------
+    Each handler receives ``(driver, packet)`` where ``packet`` is the dict
+    returned by ``parse_packet``.  Handlers may be plain functions or coroutines.
+
+    handler_zone_update      — fired when a zone field is present in the packet
+    handler_partition_update — fired when a partition field is present (no zone)
+    handler_general_update   — fired for every incoming packet
+
+    The lower-level ``on()`` / ``_emit()`` system is also available for
+    registering callbacks keyed by command code or friendly alias.
     """
 
     def __init__(self, port: str, baud: int = 9600, timeout: float = 1.0):
@@ -119,7 +124,7 @@ class IT100:
         await self.disconnect()
 
     # ------------------------------------------------------------------
-    # Event system
+    # Generic event system
     # ------------------------------------------------------------------
 
     def on(self, event: str, callback: Callable):
@@ -127,9 +132,9 @@ class IT100:
         Register a callback for an IT-100 event.
 
         The event name can be a 3-digit command code (e.g. '650') or a
-        friendly alias from the EVENTS dict.
+        friendly alias from the EVENTS dict.  Use '*' to receive every packet.
 
-        The callback receives the full packet dict returned by parse_packet::
+        The callback receives the full packet dict::
 
             {
                 'command':  '609',
@@ -141,15 +146,6 @@ class IT100:
 
         The callback can be a plain function or a coroutine function;
         both are dispatched non-blocking via the event loop.
-
-        Example::
-
-            panel.on('zone_open', lambda pkt: print(pkt['parsed']['zone']))
-
-            async def on_alarm(pkt):
-                await notify(pkt)
-
-            panel.on('partition_alarm', on_alarm)
         """
         code = EVENTS.get(event, event)
         self._listeners.setdefault(code, []).append(callback)
@@ -158,7 +154,7 @@ class IT100:
         """Schedule all listeners for this command code on the event loop (non-blocking)."""
         code = packet['command']
         for cb in self._listeners.get(code, []) + self._listeners.get('*', []):
-            if asyncio.iscoroutinefunction(cb):
+            if inspect.iscoroutinefunction(cb):
                 self._loop.create_task(
                     _safe_coro(cb, packet, code),
                     name=f'it100-cb-{code}',
@@ -169,14 +165,6 @@ class IT100:
     # ------------------------------------------------------------------
     # Typed event handler properties (reference library pattern)
     # ------------------------------------------------------------------
-    # Each handler receives (driver, packet) where packet is the dict
-    # returned by parse_packet.  Handlers may be plain functions or
-    # coroutines; both are awaited/called inside _invoke_handler.
-    #
-    # handler_zone_update      — fired when a zone field is present
-    # handler_partition_update — fired when a partition field is present
-    #                            (and no zone field)
-    # handler_general_update   — fired for every incoming packet
 
     @property
     def handler_zone_update(self) -> Optional[Callable]:
@@ -206,7 +194,7 @@ class IT100:
         """Call a typed handler, supporting both plain functions and coroutines."""
         if handler is None:
             return
-        if asyncio.iscoroutinefunction(handler):
+        if inspect.iscoroutinefunction(handler):
             await handler(self, packet)
         else:
             handler(self, packet)
@@ -330,8 +318,8 @@ class IT100:
 
     async def send_code(self, code: str):
         """
-        Send an access code in response to a Code Required (900) event
-        (cmd 200). 4-digit codes are automatically padded to 6 digits.
+        Send an access code in response to a Code Required (900) event (cmd 200).
+        4-digit codes are automatically padded to 6 digits.
         """
         code = _pad_code(code)
         await self._send(CMD_CODE_SEND, code)
@@ -346,7 +334,6 @@ class IT100:
     async def key_press(self, key: str, long_press: bool = False):
         """
         Simulate a keypad keypress (cmd 070). Requires virtual keypad enabled.
-        For a long press, set long_press=True (adds 1.5s delay before break).
 
         Key values:
             Digits    : '0'-'9'
@@ -360,7 +347,7 @@ class IT100:
         await self._send(CMD_KEY_PRESSED, key)
         if long_press:
             await asyncio.sleep(1.5)
-        await self._send(CMD_KEY_PRESSED, '^')   # break
+        await self._send(CMD_KEY_PRESSED, '^')
 
     async def set_virtual_keypad(self, enabled: bool = True):
         """Enable or disable the virtual keypad (cmd 058)."""
@@ -402,8 +389,7 @@ class IT100:
         mode       : '+' increment, '-' decrement, '=' set absolute
         value      : temperature value (used with mode '='), e.g. 72
         """
-        val_str = f'{value:03d}'
-        await self._send(CMD_TEMPERATURE_CHANGE, f'{thermostat}{set_type}{mode}{val_str}')
+        await self._send(CMD_TEMPERATURE_CHANGE, f'{thermostat}{set_type}{mode}{value:03d}')
 
     async def save_temperature(self, thermostat: int):
         """Save thermostat set points to Escort module (cmd 097)."""
@@ -416,8 +402,7 @@ class IT100:
     async def bypass_zone(self, zone: int, code: Optional[str] = None):
         """
         Bypass a zone using the virtual keypad sequence.
-        If the panel requires a code, supply it via the code parameter.
-        Zone must be 1-64.
+        Zone must be 1-64.  Supply code if the panel requires one.
         """
         await self.set_virtual_keypad(True)
         await self.key_press('*')
@@ -428,8 +413,7 @@ class IT100:
         for ch in f'{zone:02d}':
             await self.key_press(ch)
 
-    async def arm_with_auto_code(self, partition: int, code: str,
-                                 mode: str = 'stay'):
+    async def arm_with_auto_code(self, partition: int, code: str, mode: str = 'stay'):
         """
         Arm a partition and automatically respond to Code Required (900)
         events with the supplied code.
@@ -445,30 +429,3 @@ class IT100:
             raise ValueError(f"Unknown mode: {mode!r}. Use 'away', 'stay', or 'no_delay'.")
         self._code_callbacks[partition] = code
         await self._send(_ARM_CMDS[mode], str(partition))
-
-
-# ---------------------------------------------------------------------------
-# Quick sanity check
-# ---------------------------------------------------------------------------
-
-if __name__ == '__main__':
-    from utils import calculate_checksum, build_packet, parse_packet
-
-    # Test checksum calculation with the example from the manual:
-    # Partition Alarm on partition 3 → command=654, data=3
-    # Expected checksum: D2
-    cmd, data = '654', '3'
-    ck = calculate_checksum(cmd, data)
-    assert ck == 'D2', f'Checksum mismatch: {ck}'
-    print(f'Checksum OK: {cmd}{data}{ck}\\r\\n')
-
-    # Test packet building
-    pkt = build_packet('000')   # Poll
-    print(f'Poll packet: {pkt!r}')
-
-    # Test packet parsing
-    pkt_str = '6501CC'   # Partition Ready, partition 1
-    parsed = parse_packet(pkt_str)
-    print(f'Parsed: {parsed}')
-
-    print('All self-tests passed.')

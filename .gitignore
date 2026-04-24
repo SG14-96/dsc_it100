@@ -1,7 +1,12 @@
-./venv
+venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
 .claude
+dist/
+build/
+*.egg-info/
+.eggs/

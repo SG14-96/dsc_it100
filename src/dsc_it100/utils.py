@@ -1,7 +1,7 @@
 import logging
 from typing import Callable, Optional
 
-from constants import (
+from .constants import (
     ARM_MODES, BAUD_RATES, ERROR_CODES,
     CMD_ZONE_OPEN, CMD_ZONE_RESTORED, CMD_ZONE_FAULT, CMD_ZONE_FAULT_RESTORE,
     CMD_ZONE_ALARM, CMD_ZONE_ALARM_RESTORE, CMD_ZONE_TAMPER, CMD_ZONE_TAMPER_RESTORE,
